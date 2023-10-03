@@ -40,6 +40,13 @@ along with GCC; see the file COPYING3.  If not see
 #include <vector>
 #include <cstring>
 #include <sstream>
+#include <signal.h>
+
+#include <csetjmp>
+
+int timeout_sec = 30;
+sigjmp_buf jmp_env;
+volatile sig_atomic_t timed_out = 0;
 
 extern int main (int, char **);
 std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>&, const std::string&, const std::string&);
@@ -70,20 +77,31 @@ std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_
 
   return optimized_argv_sets;
 }
+
+
 std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path) {
   std::vector<std::string> new_argv;
+  // '|'가 있다면
+  // 앞에꺼를 new_argv에 push
   new_argv.push_back(original_argv[0]);
-  new_argv.push_back(src_path);
+  std::string l_src_path;
+  size_t pos = src_path.find('|');
+  if(pos != std::string::npos) { // if yarpgen
+    new_argv.push_back(src_path.substr(0, pos));
+    l_src_path = src_path.substr(pos + 1);
+  } else { // csmith
+    l_src_path = src_path;
+  }
+  new_argv.push_back(l_src_path);
   new_argv.push_back("-o");
 
   // make binary path 
-  size_t last_slash = src_path.rfind('/');
+  size_t last_slash = l_src_path.rfind('/');
   if (last_slash == std::string::npos) {
     new_argv.push_back("gcc_" + opt.substr(1));
   } else {
-    new_argv.push_back(src_path.substr(0, last_slash + 1) + "gcc_" + opt.substr(1));
+    new_argv.push_back(l_src_path.substr(0, last_slash + 1) + "gcc_" + opt.substr(1));
   }
-
   new_argv.push_back(opt);
 
   return new_argv;
@@ -100,6 +118,16 @@ void fork_hand_shake() {
     }
     std::cout << "done\n";
     std::cout.flush();
+    std::string time_out;
+    std::getline(std::cin, time_out);
+    timeout_sec = std::stoi(time_out);
+    std::cout << "time_out_set " << timeout_sec << "\n";
+    std::cout.flush();
+}
+
+void alarm_handler(int sig) {
+    timed_out = 1;
+    siglongjmp(jmp_env, 1);
 }
 
 int
@@ -119,6 +147,9 @@ main (int argc, char **argv)
          std::string src_path;
          std::getline(std::cin, src_path);
 
+         // parsing timeout sec
+
+
          if (src_path == "exit") {
            printf("compile exit!\n");
            exit(0);
@@ -127,6 +158,7 @@ main (int argc, char **argv)
          auto optimized_argv_sets = init(argv_template, src_path);
          std::vector<pid_t> children;
          for (const auto& argv_set : optimized_argv_sets) {
+          
         pid_t pid = fork();
         if (pid == 0) {   // 자식 프로세스
           std::vector<char*> argv_pointers;
@@ -135,6 +167,7 @@ main (int argc, char **argv)
           }
           argv_pointers.push_back(nullptr);
           auto ret = gcc_main(argv_pointers.size() - 1, argv_pointers.data());
+          std::cout.flush();
           exit(ret);  // 자식 프로세스 종료
         }
         else if (pid > 0) {
@@ -142,32 +175,45 @@ main (int argc, char **argv)
         }
         else {
           perror("fork error!!!\n");
+          std::cout.flush();
           exit(1);
         }
       }
+      signal(SIGALRM, alarm_handler);
+      alarm(timeout_sec);  // timeout_sec초 후에 알람 설정
+
+
       // 모든 자식 프로세스가 완료될 때까지 대기
       std::stringstream ss;
       ss << "{";
       int i = 0;
       for (pid_t child_pid : children) {
-        auto wpid = waitpid(child_pid, &status, WUNTRACED | WCONTINUED);
-        if (wpid == -1) {
-          perror("waitpid");
-          exit(EXIT_FAILURE);
+        if (sigsetjmp(jmp_env, 1) == 0) {
+            int status;
+            auto wpid = waitpid(child_pid, &status, 0/*WUNTRACED | WCONTINUED*/);
+            ss << "    \"" << "O" + std::to_string(i) << "\": \""<< status << "\",";
+        } else {
+          if (timed_out) {
+              timed_out = 0;
+              ss << "    \"" << "O" + std::to_string(i) << "\": \""<< "Compile Timeout" << "\",";
+          } else {
+            perror("waitpid");
+            exit(EXIT_FAILURE);
+          }
         }
-        ss << "    \"" << "O" + std::to_string(i) << "\": \""<< status << "\",";
-         i++;
+        i++;
       }
       ss << "}\n";
       size_t last_slash = src_path.rfind('/');
 
       if (last_slash != std::string::npos) {
          src_path.replace(last_slash + 1, src_path.length() - last_slash - 1, "gcc_");
-      } else {
+      } else { // ERROR
           std::cout << "'/' not found in the string." << std::endl;
+          std::cout.flush();
       }
-
       std::cout << src_path << "|" << ss.str();
+      std::cout.flush();
    }
    } else {
       return gcc_main(argc, argv);
