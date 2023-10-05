@@ -56,19 +56,277 @@
 using namespace clang;
 using namespace clang::driver;
 using namespace llvm::opt;
-#include <vector>
-#include <string>
-#include <thread>
-#include <iostream>      // for std::cin
-#include <unistd.h>      // for fork()
-#include <sys/wait.h>    // for waitpid()
-#include <sstream>
-#include <signal.h>
-#include <csetjmp>
 
-int timeout_sec = 30;
-sigjmp_buf jmp_env;
-volatile sig_atomic_t timed_out = 0;
+// For forkserver
+#include <string>
+#include <vector>
+#include <iostream>
+#include <string_view>
+#include <utility>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <thread>
+#include <future>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <tuple>
+#include <sstream>
+
+int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext);
+
+void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext);
+std::vector<std::string> copy_argv(int argc, char **argv);
+std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_template, const std::string& src_path);
+std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path);
+int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext);
+bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
+void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
+std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level);
+std::string wait_child();
+bool fork_handshake();
+void flush_stdcout(std::string_view);
+void make_result(std::stringstream& ss, std::string_view opt_level, int status);
+void send_json(std::string result, std::string binary_base);
+
+namespace fork_server {
+  std::vector<std::string> opt_levels {"-O0", "-O1", "-O2", "-O3"};
+  std::vector<std::tuple<pid_t, std::string>> children; //pid, opt_level
+  int compile_timeout_sec = 10;
+  const int time_out_ms = 50; // 0.05초
+  const char* fork_client_hello_msg = "fork client hello\n";
+  const char* fork_server_hello_msg = "fork server hello";
+  const char* fork_handshake_done_msg = "done\n";
+  const char* exit_msg = "exit\n";
+  std::string time_out_set_msg = "time_out_set";
+  const std::string compiler_string = "clang_";
+  const char* bob_argv = "bob.c";
+
+}
+
+namespace string_helper {
+std::string extract_left_of_delimiter(const std::string& src, char delimiter);
+std::string extract_right_of_delimiter(const std::string& src, char delimiter);
+std::string extract_prefix_up_to_last_slash(const std::string& src);
+
+std::string extract_left_of_delimiter(const std::string& src, char delimiter) {
+    size_t pos = src.find(delimiter);
+    return (pos != std::string::npos) ? src.substr(0, pos) : "";
+}
+
+std::string extract_right_of_delimiter(const std::string& src, char delimiter) {
+    size_t pos = src.find(delimiter);
+    return (pos != std::string::npos) ? src.substr(pos + 1) : src;
+}
+
+std::string extract_prefix_up_to_last_slash(const std::string& src) {
+    size_t last_slash = src.rfind('/');
+    return (last_slash == std::string::npos) ? "" : src.substr(0, last_slash + 1);
+}
+}
+
+int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext) {
+  pid_t pid = fork();
+  if (pid == 0) {   // 자식 프로세스
+    std::vector<char*> argv_pointers;
+    for (const auto& arg : argv_set) {
+      argv_pointers.push_back(const_cast<char*>(arg.c_str()));
+    }
+    argv_pointers.push_back(nullptr);
+    auto ret = real_clang_main(argv_pointers.size() - 1, argv_pointers.data(), ToolContext);
+    exit(ret);  // 자식 프로세스 종료
+  } else if (pid > 0) { // parent
+    std::string opt_level = argv_set.back();
+    opt_level.erase(0, 1); // -O3 -> O3
+    fork_server::children.push_back({pid, opt_level});
+    return 0;
+  } else {
+    perror("fork error!!!\n");
+    exit(1);
+  }
+}
+
+void make_result(std::stringstream& ss, std::string_view opt_level, int status) {
+  ss << "        \"" << opt_level << "\": \""<< status << "\",\n";
+}
+
+bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
+    int status;
+    auto wpid = waitpid(child_pid, &status, WNOHANG);
+    if (wpid == -1) {
+        perror("waitpid");
+        return false;  // 에러 발생
+    } else if (wpid == child_pid) {
+        //std::cout << opt_level << "\n";
+        //printf("Child %d exited with status %d\n", child_pid, status);
+        make_result(ss, opt_level, status);
+        // 정상 종료된거 처리
+        return true;  // 자식 프로세스가 종료됨
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
+    return false;  // 자식 프로세스가 종료되지 않음
+}
+
+void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
+    auto ret = kill(child_pid, SIGALRM);
+    if(ret == -1) {
+        perror("kill");
+        exit(1);
+    }
+    // Wait for child process to terminate after sending SIGALRM
+    while (!wait_for_child_exit(child_pid, opt_level, ss));
+}
+
+std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level) {
+    std::stringstream result_stream;
+
+    time_t start_time = time(nullptr);
+    
+    while (time(nullptr) - start_time < fork_server::compile_timeout_sec) {
+        if (wait_for_child_exit(child_pid, opt_level, result_stream)) {  // 0.05초마다 확인
+            return result_stream;  // 자식 프로세스가 종료됨
+        }
+    }
+    // timeout 후에도 child process가 종료되지 않은 경우 처리
+    kill_child_wait(child_pid, opt_level, result_stream);
+    return result_stream;
+}
+
+
+std::string wait_child() {
+  std::vector<std::future<std::stringstream>> futures;
+
+  for (const auto& [child_pid, opt_level] : fork_server::children) {
+        futures.push_back(std::async(std::launch::async, wait_child_thread, child_pid, opt_level));
+  }
+
+  std::string result_str;
+  for (auto& future : futures) {
+      auto json = future.get();  // 비동기 작업의 결과를 가져옴
+      // childExited를 사용하여 필요한 처리 수행...
+      result_str.append(json.str());
+      //std::cout << json.str();
+  }
+  fork_server::children.clear();
+  
+  return result_str;
+}
+
+void flush_stdcout(std::string_view msg) {
+  std::cout << msg;
+  std::cout.flush();
+}
+
+bool fork_handshake() {
+    // Write Client Hello
+    std::string tmp_msg;
+    flush_stdcout(fork_server::fork_client_hello_msg);
+
+    // Read Server Hello
+    std::getline(std::cin, tmp_msg);
+    if(strcmp(tmp_msg.c_str(), fork_server::fork_server_hello_msg) != 0) {
+      flush_stdcout("Failed to Server Hello\n");
+      return false;
+    }
+    // Send Done
+    flush_stdcout(fork_server::fork_handshake_done_msg);
+
+    // Read & set compile time out
+    std::getline(std::cin, tmp_msg);
+
+    // Possible Exception!
+    fork_server::compile_timeout_sec = std::stoi(tmp_msg);
+
+    flush_stdcout(fork_server::time_out_set_msg + " " + std::to_string(fork_server::compile_timeout_sec) + "\n");
+    return true;
+}
+
+void send_json(std::string result, std::string binary_base) {
+  std::stringstream json_stream;
+  json_stream << "{\n";
+  json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",\n";
+  json_stream << "    \"" << "result" << "\": {\n";
+  json_stream << result;
+  json_stream << "    }\n";
+  json_stream << "}\n";
+  // return result
+  std::cout << json_stream.str();
+}
+
+void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext) {
+    std::vector<std::string> argv_template;
+    argv_template = copy_argv(argc, argv);
+    // 여기까지는 딱 한번
+    auto handshake_ret = fork_handshake();
+    if(!handshake_ret) {
+      std::cerr << "Failed to fork handshake\n";
+      exit(1);
+    }
+    while(1) {
+      // get source code file!
+      std::string command;
+      std::getline(std::cin, command);
+      auto optimized_argv_sets = init(argv_template, command);
+
+      for (const auto& argv_set : optimized_argv_sets) {
+        auto fork_ret = fork_clang(argv_set, ToolContext);
+        if(fork_ret) {
+          printf("fork error\n");
+          exit(1);
+        }
+      }
+
+      // wait the compile & result
+      auto result_str = std::move(wait_child());
+      // make binary_base
+      std::string prefix = string_helper::extract_prefix_up_to_last_slash(string_helper::extract_right_of_delimiter(command, '|'));
+      auto binary_base = std::move(prefix + fork_server::compiler_string);
+      send_json(result_str, binary_base);
+    }
+}
+
+std::vector<std::string> copy_argv(int argc, char **argv) {
+    std::vector<std::string> copy(argc);
+    for (int i = 0; i < argc; i++) {
+        copy[i] = argv[i];
+    }
+    return copy;
+}
+
+std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_template, const std::string& src_path) {
+  std::vector<std::vector<std::string>> optimized_argv_sets(4);
+
+  for (int i = 0; i < 4; i++) {
+    optimized_argv_sets[i] = modify_argv_for_optimization(argv_template, fork_server::opt_levels[i], src_path);
+  }
+
+  return optimized_argv_sets;
+}
+
+std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, 
+                                                      const std::string& opt, 
+                                                      const std::string& src_path) {
+    std::vector<std::string> new_argv;
+    
+    new_argv.push_back(original_argv[0]);
+    
+    std::string left_src = string_helper::extract_left_of_delimiter(src_path, '|');
+    if(!left_src.empty()) {
+        new_argv.push_back(left_src);
+    }
+    
+    std::string l_src_path = string_helper::extract_right_of_delimiter(src_path, '|');
+    new_argv.push_back(l_src_path);
+    new_argv.push_back("-o");
+
+    std::string prefix = string_helper::extract_prefix_up_to_last_slash(l_src_path);
+    new_argv.push_back(prefix + fork_server::compiler_string + opt.substr(1));
+    
+    new_argv.push_back(opt);
+
+    return new_argv;
+}
 
 std::string GetExecutablePath(const char *Argv0, bool CanonicalPrefixes) {
   if (!CanonicalPrefixes) {
@@ -388,7 +646,9 @@ static int ExecuteCC1Tool(SmallVectorImpl<const char *> &ArgV,
   return 1;
 }
 
-int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext ) {
+
+
+int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
     noteBottomOfStack();
   llvm::InitLLVM X(Argc, Argv);
   llvm::setBugReportMsg("PLEASE submit a bug report to " BUG_REPORT_URL
@@ -616,166 +876,12 @@ int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext 
   // failing command.
   return Res;
 }
-
-int calculate_argc(char **argv) {
-    int argc = 0;
-    while (argv[argc] != NULL) {
-        argc++;
-    }
-    return argc;
-}
-
-std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path) {
-  std::vector<std::string> new_argv;
-  // '|'가 있다면
-  // 앞에꺼를 new_argv에 push
-  new_argv.push_back(original_argv[0]);
-  std::string l_src_path;
-  size_t pos = src_path.find('|');
-  if(pos != std::string::npos) { // if yarpgen
-    new_argv.push_back(src_path.substr(0, pos));
-    l_src_path = src_path.substr(pos + 1);
-  } else { // csmith
-    l_src_path = src_path;
-  }
-  new_argv.push_back(l_src_path);
-  new_argv.push_back("-o");
-
-  // make binary path 
-  size_t last_slash = l_src_path.rfind('/');
-  if (last_slash == std::string::npos) {
-    new_argv.push_back("clang_" + opt.substr(1));
+int clang_main(int argc, char **argv, const llvm::ToolContext &ToolContext) {
+  if(argc > 1 && strcmp(argv[1], fork_server::bob_argv) == 0) {
+    // start forkserver
+    start_forkserver(argc, argv, ToolContext);
   } else {
-    new_argv.push_back(l_src_path.substr(0, last_slash + 1) + "clang_" + opt.substr(1));
+    return real_clang_main(argc, argv, ToolContext);
   }
-  new_argv.push_back(opt);
-
-  return new_argv;
 }
 
-std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_template, const std::string& src_path) {
-  const char* opt_levels[] = {"-O0", "-O1", "-O2", "-O3"};
-  std::vector<std::vector<std::string>> optimized_argv_sets(4);
-
-  for (int i = 0; i < 4; i++) {
-    optimized_argv_sets[i] = modify_argv_for_optimization(argv_template, opt_levels[i], src_path);
-  }
-
-  return optimized_argv_sets;
-}
-
-std::vector<std::string> copy_argv(int argc, char **argv) {
-    std::vector<std::string> copy(argc);
-    for (int i = 0; i < argc; i++) {
-        copy[i] = argv[i];
-    }
-    return copy;
-}
-
-void fork_hand_shake() {
-    std::cout << "fork client hello\n";
-    std::cout.flush();
-    char server_hello[19] = {0}; // Initialize with zeros
-    read(0, server_hello, 19);   // Read one byte less to account for the NULL terminator
-    server_hello[18] = '\0';     // Null-terminate the string
-    
-    if(strcmp(server_hello, "fork server hello\n") != 0) {
-        exit(1);
-    }
-    std::cout << "done\n";
-    std::cout.flush();
-    std::string time_out;
-    std::getline(std::cin, time_out);
-    timeout_sec = std::stoi(time_out);
-    std::cout << "time_out_set " << timeout_sec << "\n";
-    std::cout.flush();
-}
-
-void alarm_handler(int sig) {
-    timed_out = 1;
-    siglongjmp(jmp_env, 1);
-}
-
-
-int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
-  std::vector<std::string> argv_template;
-
-  if (Argc > 1 && strcmp(Argv[1], "bob.c") == 0) {
-    int status;
-    fork_hand_shake();
-    // O0, O1, O2, O3 
-    argv_template = copy_argv(Argc, Argv);
-    while(true){
-      std::string src_path;
-      std::getline(std::cin, src_path);
-      
-      if (src_path == "exit") {
-        printf("compile exit!\n");
-        std::cout.flush();
-        exit(0);
-      }
-
-      auto optimized_argv_sets = init(argv_template, src_path);
-      std::vector<pid_t> children;
-
-      for (const auto& argv_set : optimized_argv_sets) {
-        pid_t pid = fork();
-        if (pid == 0) {   // 자식 프로세스
-          std::vector<char*> argv_pointers;
-          for (const auto& arg : argv_set) {
-            argv_pointers.push_back(const_cast<char*>(arg.c_str()));
-          }
-          argv_pointers.push_back(nullptr);
-          auto ret = real_clang_main(argv_pointers.size() - 1, argv_pointers.data(), std::cref(ToolContext));
-          exit(ret);  // 자식 프로세스 종료
-        }
-        else if (pid > 0) {
-          children.push_back(pid);
-        }
-        else {
-          perror("fork error!!!\n");
-          exit(1);
-        }
-      }
-      signal(SIGALRM, alarm_handler);
-      alarm(timeout_sec);  // timeout_sec초 후에 알람 설정
-
-
-      // 모든 자식 프로세스가 완료될 때까지 대기
-      std::stringstream ss;
-      ss << "{";
-      int i = 0;
-      for (pid_t child_pid : children) {
-        if (sigsetjmp(jmp_env, 1) == 0) {
-            int status;
-            auto wpid = waitpid(child_pid, &status, 0/*WUNTRACED | WCONTINUED*/);
-            ss << "    \"" << "O" + std::to_string(i) << "\": \""<< status << "\",";
-        } else {
-          if (timed_out) {
-              timed_out = 0;
-              ss << "    \"" << "O" + std::to_string(i) << "\": \""<< "Compile Timeout" << "\",";
-          } else {
-            perror("waitpid");
-            exit(EXIT_FAILURE);
-          }
-        }
-        i++;
-      }
-      ss << "}\n";
-      size_t last_slash = src_path.rfind('/');
-
-      if (last_slash != std::string::npos) {
-         src_path.replace(last_slash + 1, src_path.length() - last_slash - 1, "clang_");
-      } else { // ERROR
-          std::cout << "'/' not found in the string." << std::endl;
-          std::cout.flush();
-      }
-      std::cout << src_path << "|" << ss.str();
-      std::cout.flush();
-   }
-  } 
-  else {
-    return real_clang_main(Argc, Argv, ToolContext);
-  }
-  return 0;
-}
