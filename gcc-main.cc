@@ -243,7 +243,7 @@ void send_json(std::string result, std::string binary_base) {
 }
 
 void exit_compiler(int ret, std::string_view msg) {
-  std::cout << "{ \"exit\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
+  std::cout << "{ \"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
   std::cout.flush();
   exit(ret);
 }

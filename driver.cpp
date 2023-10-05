@@ -128,7 +128,7 @@ std::string extract_prefix_up_to_last_slash(const std::string& src) {
 }
 
 void exit_compiler(int ret, std::string_view msg) {
-  std::cout << "{ \"exit\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
+  std::cout << "{ \"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
   std::cout.flush();
   exit(ret);
 }
