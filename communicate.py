@@ -1,71 +1,53 @@
 import subprocess
-import threading
 import json
 
-def reader_thread(pipe):
-    while True:
-        line = pipe.readline()
-        if line:
-            #print("read", line)
-            if line in "compile exit!\n" :
-                print(line)
-                break
-            file_name = line.split('|')[0]
-            start_index = line.find("{")
-            end_index = line.rfind("}") + 1
-            json_str = line[start_index:end_index]
-            
-            # 마지막 콤마 제거
-            if json_str[-2] == ',':
-                json_str = json_str[:-2] + json_str[-1]
-            
-            # JSON 파싱
-            data = json.loads(json_str)
-            print(data)
-            print(file_name)
-            for d in data:
-                file_path = file_name + str(d)
-                r = subprocess.run(*[file_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-                print(r.stdout)
-        else:
-            break
+compile_time_out = "10\n"
 
+def sync_write_data(compiler, data:str) :
+    compiler.stdin.write(data)
+    compiler.stdin.flush()
 
 # C 프로그램 실행
-process = subprocess.Popen(["./gcc-trunk", "bob.c", "-o", "out", "-O0"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+gcc_compiler = subprocess.Popen(["/home/dongFiles/compiler_trunk/llvm-project/build/bin/clang-18", "bob.c"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
-def fork_handshake():
-    ret = process.stdout.readline()
+def fork_handshake(compiler) -> bool:
+    ret = compiler.stdout.readline()
     if ret not in "fork client hello\n" : 
         print("fork client hello failed")
-        exit(1)
-    process.stdin.write("fork server hello\n")
-    process.stdin.flush()
-    ret = process.stdout.readline()
+        return False
+    sync_write_data(gcc_compiler,"fork server hello\n")
+    ret = compiler.stdout.readline()
     if ret not in "done\n" :
         print("fork server hello failed\n")
-        exit(1)
-    print("fork handshake done!")
+        return False
+    # set timeout
+    sync_write_data(gcc_compiler, compile_time_out)
+    ret = compiler.stdout.readline()
+    if "time_out_set" not in ret:
+        print("failed to set time out\n")
+        return False 
+    print(ret)
+    return True
 
-fork_handshake()
+fork_handshake(gcc_compiler)
 
-
-stdout_thread = threading.Thread(target=reader_thread, args=(process.stdout,))
-
-stdout_thread.start()
-
+source_codes = ["./uuid0/hello0.c\n", "./uuid2/driver.c|./uuid2/func.c\n","./uuid1/hello1.c\n"]
 
 # input Source Code File Name
-for i in range(3):
-    source_code = f"./uuid{i}/hello{i}.c\n"  # Add a newline to indicate the end of the line
-    process.stdin.write(source_code)
-    process.stdin.flush() # Ensure that the data is actually sent to the C program
+for src in source_codes:
+    sync_write_data(gcc_compiler, src)
+    line = gcc_compiler.stdout.readline()
+    # remove ,
+    new_line = line[:-8] + line[-5:]
+    data_dict = json.loads(new_line)
+    print(data_dict)
 
 
 exit_cmd = f"exit\n"
-process.stdin.write(exit_cmd)
-process.stdin.flush()
+gcc_compiler.stdin.write(exit_cmd)
+gcc_compiler.stdin.flush()
+line = gcc_compiler.stdout.readline()
+print(line)
 
-stdout_thread.join()
-process.terminate()
+gcc_compiler.terminate()
 

@@ -89,6 +89,7 @@ bool fork_handshake();
 void flush_stdcout(std::string_view);
 void make_result(std::stringstream& ss, std::string_view opt_level, int status);
 void send_json(std::string result, std::string binary_base);
+void exit_compiler();
 
 namespace fork_server {
   std::vector<std::string> opt_levels {"-O0", "-O1", "-O2", "-O3"};
@@ -126,6 +127,12 @@ std::string extract_prefix_up_to_last_slash(const std::string& src) {
 }
 }
 
+void exit_compiler() {
+  std::cout << "Compiler Exit!\n";
+  std::cout.flush();
+  exit(0);
+}
+
 int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext) {
   pid_t pid = fork();
   if (pid == 0) {   // 자식 프로세스
@@ -148,7 +155,7 @@ int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext
 }
 
 void make_result(std::stringstream& ss, std::string_view opt_level, int status) {
-  ss << "        \"" << opt_level << "\": \""<< status << "\",\n";
+  ss << "        \"" << opt_level << "\": \""<< status << "\",";
 }
 
 bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
@@ -244,14 +251,14 @@ bool fork_handshake() {
 
 void send_json(std::string result, std::string binary_base) {
   std::stringstream json_stream;
-  json_stream << "{\n";
-  json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",\n";
-  json_stream << "    \"" << "result" << "\": {\n";
+  json_stream << "{";
+  json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",";
+  json_stream << "    \"" << "result" << "\": {";
   json_stream << result;
-  json_stream << "    }\n";
+  json_stream << "    }";
   json_stream << "}\n";
-  // return result
   std::cout << json_stream.str();
+  std::cout.flush();
 }
 
 void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext) {
@@ -267,6 +274,11 @@ void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext
       // get source code file!
       std::string command;
       std::getline(std::cin, command);
+      
+      if(command == "exit") {
+        exit_compiler();
+      }
+
       auto optimized_argv_sets = init(argv_template, command);
 
       for (const auto& argv_set : optimized_argv_sets) {
