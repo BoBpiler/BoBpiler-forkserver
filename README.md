@@ -2,6 +2,21 @@
 
 gcc/clang BoBpiler Forkserver
 
+### Quick Start
+```bash
+./clang-18 bob.c                
+fork client hello
+fork server hello # stdin
+done
+10 # stdin
+time_out_set 10
+./uuid0/hello0.c # stdin
+{    "binary_base": "./uuid0/clang_",    "result": {        "O0": "0",        "O1": "0",        "O2": "0",        "O3": "0",    }}
+./_uuid2/driver.c|./_uuid2/func.c # stdin
+{    "binary_base": "./_uuid2/clang_",    "result": {        "O0": "0",        "O1": "0",        "O2": "0",        "O3": "0",    }}
+```
+
+## Protocol
 ### Fork handshake
 ```bash
 1. Forkserver -> fuzzer.py
