@@ -28,12 +28,12 @@ gcc/clang BoBpiler Forkserver
 ### Forkserver Result
 ```JSON
 {
-  'binary_base' : './output/csmith/uuid0/clang_',
-  'result' : {
-                'O0' : '0',
-                'O1' : '0',
-                'O2' : '0',
-                'O3' : '14',
+  "binary_base" : "./output/csmith/uuid0/clang_",
+  "result" : {
+                "O0" : "0",
+                "O1" : "0",
+                "O2" : "0",
+                "O3" : "14",
               }
 }
 ```
