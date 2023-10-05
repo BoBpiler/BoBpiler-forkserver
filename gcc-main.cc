@@ -70,7 +70,7 @@ bool fork_handshake();
 void flush_stdcout(std::string_view);
 void make_result(std::stringstream& ss, std::string_view opt_level, int status);
 void send_json(std::string result, std::string binary_base);
-void exit_compiler(int ret);
+void exit_compiler(int ret, std::string_view);
 
 namespace fork_server {
   std::vector<std::string> opt_levels {"-O0", "-O1", "-O2", "-O3"};
@@ -131,8 +131,7 @@ int fork_gcc(const std::vector<std::string> &argv_set) {
     fork_server::children.push_back({pid, opt_level});
     return 0;
   } else {
-    perror("fork error!!!\n");
-    exit_compiler(1);// 시스템콜 에러 이므로 컴파일러 종료
+    exit_compiler(1, "fork error");// 시스템콜 에러 이므로 컴파일러 종료
     exit(1);
   }
 }
@@ -145,8 +144,7 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
     int status;
     auto wpid = waitpid(child_pid, &status, WNOHANG);
     if (wpid == -1) {
-        perror("waitpid");
-        exit_compiler(1);// 시스템콜 에러 이므로 컴파일러 종료
+        exit_compiler(1, "waitpid error");// 시스템콜 에러 이므로 컴파일러 종료
     } else if (wpid == child_pid) {
         make_result(ss, opt_level, status);
         // 정상 종료된거 처리
@@ -159,8 +157,7 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
 void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
     auto ret = kill(child_pid, SIGALRM);
     if(ret == -1) {
-        perror("kill");
-        exit_compiler(1);// 시스템콜 에러 이므로 컴파일러 종료
+        exit_compiler(1, "kill");// 시스템콜 에러 이므로 컴파일러 종료
         exit(1);
     }
     // Wait for child process to terminate after sending SIGALRM
@@ -217,7 +214,7 @@ bool fork_handshake() {
     // Read Server Hello
     std::getline(std::cin, tmp_msg);
     if(strcmp(tmp_msg.c_str(), fork_server::fork_server_hello_msg) != 0) {
-      exit_compiler(1);// 시스템콜 에러 이므로 컴파일러 종료
+      exit_compiler(1, "forkserver hello failed");
       return false;
     }
     // Send Done
@@ -245,8 +242,8 @@ void send_json(std::string result, std::string binary_base) {
   std::cout.flush();
 }
 
-void exit_compiler(int ret) {
-  std::cout << "Compiler Exit!\n";
+void exit_compiler(int ret, std::string_view msg) {
+  std::cout << "{ \"exit\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
   std::cout.flush();
   exit(ret);
 }
@@ -257,7 +254,7 @@ void start_forkserver(int argc, char**argv) {
     // 여기까지는 딱 한번
     auto handshake_ret = fork_handshake();
     if(!handshake_ret) {
-      exit_compiler(1);// handshake 에러 이므로 컴파일러 종료
+      exit_compiler(1, "handshake failed");// handshake 에러 이므로 컴파일러 종료
     }
     while(1) {
       // get source code file!
@@ -265,7 +262,7 @@ void start_forkserver(int argc, char**argv) {
       std::getline(std::cin, command);
       
       if(command == "exit") {
-        exit_compiler(0);
+        exit_compiler(0, "normal exit");
       }
 
       auto optimized_argv_sets = init(argv_template, command);
@@ -273,9 +270,7 @@ void start_forkserver(int argc, char**argv) {
       for (const auto& argv_set : optimized_argv_sets) {
         auto fork_ret = fork_gcc(argv_set);
         if(fork_ret) {
-          printf("fork error\n");
-          exit_compiler(1);// 시스템콜 에러 이므로 컴파일러 종료
-          exit(1);
+          exit_compiler(1, "fork error");// 시스템콜 에러 이므로 컴파일러 종료
         }
       }
 

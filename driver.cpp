@@ -89,7 +89,7 @@ bool fork_handshake();
 void flush_stdcout(std::string_view);
 void make_result(std::stringstream& ss, std::string_view opt_level, int status);
 void send_json(std::string result, std::string binary_base);
-void exit_compiler(int ret);
+void exit_compiler(int ret, std::string_view msg);
 
 namespace fork_server {
   std::vector<std::string> opt_levels {"-O0", "-O1", "-O2", "-O3"};
@@ -127,8 +127,8 @@ std::string extract_prefix_up_to_last_slash(const std::string& src) {
 }
 }
 
-void exit_compiler(int ret) {
-  std::cout << "Compiler Exit!\n";
+void exit_compiler(int ret, std::string_view msg) {
+  std::cout << "{ \"exit\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
   std::cout.flush();
   exit(ret);
 }
@@ -149,8 +149,7 @@ int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext
     fork_server::children.push_back({pid, opt_level});
     return 0;
   } else {
-    perror("fork error!!!\n");
-    exit_compiler(1);
+    exit_compiler(1, "fork error");
   }
 }
 
@@ -162,11 +161,8 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
     int status;
     auto wpid = waitpid(child_pid, &status, WNOHANG);
     if (wpid == -1) {
-        perror("waitpid");
-        exit_compiler(1);
+        exit_compiler(1, "waitpid");
     } else if (wpid == child_pid) {
-        //std::cout << opt_level << "\n";
-        //printf("Child %d exited with status %d\n", child_pid, status);
         make_result(ss, opt_level, status);
         // 정상 종료된거 처리
         return true;  // 자식 프로세스가 종료됨
@@ -178,8 +174,7 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
 void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
     auto ret = kill(child_pid, SIGALRM);
     if(ret == -1) {
-        perror("kill");
-        exit_compiler(1);
+        exit_compiler(1, "kill");
     }
     // Wait for child process to terminate after sending SIGALRM
     while (!wait_for_child_exit(child_pid, opt_level, ss));
@@ -233,7 +228,7 @@ bool fork_handshake() {
     // Read Server Hello
     std::getline(std::cin, tmp_msg);
     if(strcmp(tmp_msg.c_str(), fork_server::fork_server_hello_msg) != 0) {
-      exit_compiler(1);
+      exit_compiler(1, "forkserver hello failed");
     }
     // Send Done
     flush_stdcout(fork_server::fork_handshake_done_msg);
@@ -266,7 +261,7 @@ void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext
     // 여기까지는 딱 한번
     auto handshake_ret = fork_handshake();
     if(!handshake_ret) {
-      exit_compiler(1);
+      exit_compiler(1, "handshake failed");
     }
     while(1) {
       // get source code file!
@@ -274,7 +269,7 @@ void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext
       std::getline(std::cin, command);
       
       if(command == "exit") {
-        exit_compiler(0);
+        exit_compiler(0, "normal exit");
       }
 
       auto optimized_argv_sets = init(argv_template, command);
@@ -886,6 +881,7 @@ int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext)
   // failing command.
   return Res;
 }
+
 int clang_main(int argc, char **argv, const llvm::ToolContext &ToolContext) {
   if(argc > 1 && strcmp(argv[1], fork_server::bob_argv) == 0) {
     // start forkserver
