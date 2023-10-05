@@ -14,6 +14,8 @@ time_out_set 10
 {    "binary_base": "./uuid0/clang_",    "result": {        "O0": "0",        "O1": "0",        "O2": "0",        "O3": "0",    }}
 ./_uuid2/driver.c|./_uuid2/func.c # stdin
 {    "binary_base": "./_uuid2/clang_",    "result": {        "O0": "0",        "O1": "0",        "O2": "0",        "O3": "0",    }}
+exit # stdin
+Compiler Exit!
 ```
 
 ## Protocol
