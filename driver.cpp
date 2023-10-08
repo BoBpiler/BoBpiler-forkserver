@@ -171,15 +171,14 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
     return false;  // 자식 프로세스가 종료되지 않음
 }
 
-//void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
-//    auto ret = kill(child_pid, SIGALRM);
-//    if(ret == -1) {
-//        exit_compiler(1, "kill");// 시스템콜 에러 이므로 컴파일러 종료
-//        exit(1);
-//    }
-//    // Wait for child process to terminate after sending SIGALRM
-//    while (!wait_for_child_exit(child_pid, opt_level, ss));
-//}
+// void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
+//     auto ret = kill(child_pid, SIGALRM);
+//     if(ret == -1) {
+//         exit_compiler(1, "kill");
+//     }
+//     // Wait for child process to terminate after sending SIGALRM
+//     while (!wait_for_child_exit(child_pid, opt_level, ss));
+// }
 
 std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level) {
     std::stringstream result_stream;
@@ -889,5 +888,4 @@ int clang_main(int argc, char **argv, const llvm::ToolContext &ToolContext) {
     return real_clang_main(argc, argv, ToolContext);
   }
 }
-
 
