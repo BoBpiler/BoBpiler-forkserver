@@ -128,7 +128,7 @@ std::string extract_prefix_up_to_last_slash(const std::string& src) {
 }
 
 void exit_compiler(int ret, std::string_view msg) {
-  std::cout << "{ \"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
+  std::cout << "\"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\"\n";
   std::cout.flush();
   exit(ret);
 }
@@ -167,7 +167,7 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
         // 정상 종료된거 처리
         return true;  // 자식 프로세스가 종료됨
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
+    //std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
     return false;  // 자식 프로세스가 종료되지 않음
 }
 
@@ -245,12 +245,10 @@ bool fork_handshake() {
 
 void send_json(std::string result, std::string binary_base) {
   std::stringstream json_stream;
-  json_stream << "{";
   json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",";
   json_stream << "    \"" << "result" << "\": {";
   json_stream << result;
-  json_stream << "    }";
-  json_stream << "}\n";
+  json_stream << "    }\n";
   std::cout << json_stream.str();
   std::cout.flush();
 }
@@ -890,4 +888,5 @@ int clang_main(int argc, char **argv, const llvm::ToolContext &ToolContext) {
     return real_clang_main(argc, argv, ToolContext);
   }
 }
+
 

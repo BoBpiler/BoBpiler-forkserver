@@ -150,7 +150,7 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
         // 정상 종료된거 처리
         return true;  // 자식 프로세스가 종료됨
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
+    //std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
     return false;  // 자식 프로세스가 종료되지 않음
 }
 
@@ -232,18 +232,16 @@ bool fork_handshake() {
 
 void send_json(std::string result, std::string binary_base) {
   std::stringstream json_stream;
-  json_stream << "{";
   json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",";
   json_stream << "    \"" << "result" << "\": {";
   json_stream << result;
-  json_stream << "    }";
-  json_stream << "}\n";
+  json_stream << "    }\n";
   std::cout << json_stream.str();
   std::cout.flush();
 }
 
 void exit_compiler(int ret, std::string_view msg) {
-  std::cout << "{ \"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\" }\n";
+  std::cout << "\"exit_code\" : \""<< ret <<"\", \"error_message\" : \"" << msg << "\"\n";
   std::cout.flush();
   exit(ret);
 }
@@ -260,7 +258,6 @@ void start_forkserver(int argc, char**argv) {
       // get source code file!
       std::string command;
       std::getline(std::cin, command);
-      
       if(command == "exit") {
         exit_compiler(0, "normal exit");
       }
@@ -337,3 +334,4 @@ main (int argc, char **argv)
     return gcc_main(argc, argv);
   }
 }
+
