@@ -66,42 +66,36 @@ using namespace llvm::opt;
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <thread>
-#include <future>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <tuple>
 #include <sstream>
 
 int real_clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext);
-
-void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext);
-std::vector<std::string> copy_argv(int argc, char **argv);
-std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_template, const std::string& src_path);
-std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path);
 int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext);
+
+void start_forkserver(int argc, char**argv);
+std::vector<std::string> copy_argv(int argc, char **argv);
+std::vector<std::string> init(const std::vector<std::string>& argv_template, const std::string& src_path);
+std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path);
 bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
-//void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
-std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level);
+void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
 std::string wait_child();
 bool fork_handshake();
 void flush_stdcout(std::string_view);
 void make_result(std::stringstream& ss, std::string_view opt_level, int status);
 void send_json(std::string result, std::string binary_base);
-void exit_compiler(int ret, std::string_view msg);
+void exit_compiler(int ret, std::string_view);
 
 namespace fork_server {
-  std::vector<std::string> opt_levels {"-O0", "-O1", "-O2", "-O3"};
-  std::vector<std::tuple<pid_t, std::string>> children; //pid, opt_level
+  std::tuple<pid_t, std::string> children_process; //pid, opt_level
   int compile_timeout_sec = 10;
-  const int time_out_ms = 50; // 0.05초
   const char* fork_client_hello_msg = "fork client hello\n";
   const char* fork_server_hello_msg = "fork server hello";
   const char* fork_handshake_done_msg = "done\n";
   const char* exit_msg = "exit\n";
   std::string time_out_set_msg = "time_out_set";
-  const std::string compiler_string = "clang_";
+  const std::string compiler_string = "gcc_";
   const char* bob_argv = "bob.c";
 
 }
@@ -146,7 +140,7 @@ int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext
   } else if (pid > 0) { // parent
     std::string opt_level = argv_set.back();
     opt_level.erase(0, 1); // -O3 -> O3
-    fork_server::children.push_back({pid, opt_level});
+    fork_server::children_process = {pid, opt_level};
     return 0;
   } else {
     exit_compiler(1, "fork error");
@@ -154,65 +148,47 @@ int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext
 }
 
 void make_result(std::stringstream& ss, std::string_view opt_level, int status) {
-  ss << "        \"" << opt_level << "\": \""<< status << "\",";
+  ss << "        \"" << opt_level << "\": \""<< status << "\"";
 }
 
 bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
     int status;
     auto wpid = waitpid(child_pid, &status, WNOHANG);
     if (wpid == -1) {
-        exit_compiler(1, "waitpid");
+        exit_compiler(1, "waitpid error");// 시스템콜 에러 이므로 컴파일러 종료
     } else if (wpid == child_pid) {
         make_result(ss, opt_level, status);
         // 정상 종료된거 처리
         return true;  // 자식 프로세스가 종료됨
     }
-    //std::this_thread::sleep_for(std::chrono::milliseconds(fork_server::time_out_ms));
     return false;  // 자식 프로세스가 종료되지 않음
 }
 
-// void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
-//     auto ret = kill(child_pid, SIGALRM);
-//     if(ret == -1) {
-//         exit_compiler(1, "kill");
-//     }
-//     // Wait for child process to terminate after sending SIGALRM
-//     while (!wait_for_child_exit(child_pid, opt_level, ss));
-// }
-
-std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level) {
-    std::stringstream result_stream;
-
-    // 무한 루프로 자식 프로세스가 종료될 때까지 대기합니다.
-    while (true) {
-        if (wait_for_child_exit(child_pid, opt_level, result_stream)) {
-            return result_stream;  // 자식 프로세스가 종료됨
-        }
+void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
+    auto ret = kill(child_pid, SIGALRM);
+    if(ret == -1) {
+        exit_compiler(1, "kill");// 시스템콜 에러 이므로 컴파일러 종료
+        exit(1);
     }
-
-    // 이 부분은 더 이상 실행되지 않습니다.
-    // kill_child_wait(child_pid, opt_level, result_stream);
-    // return result_stream;
+    // Wait for child process to terminate after sending SIGALRM
+    while (!wait_for_child_exit(child_pid, opt_level, ss));
 }
 
 
 std::string wait_child() {
-  std::vector<std::future<std::stringstream>> futures;
-
-  for (const auto& [child_pid, opt_level] : fork_server::children) {
-        futures.push_back(std::async(std::launch::async, wait_child_thread, child_pid, opt_level));
+  std::stringstream result_stream;
+  const auto& child_pid = std::get<0>(fork_server::children_process);
+  const auto& opt_level = std::get<1>(fork_server::children_process);
+  time_t start_time = time(nullptr);
+    
+  while (time(nullptr) - start_time < fork_server::compile_timeout_sec) {
+      if (wait_for_child_exit(child_pid, opt_level, result_stream)) {  // 0.05초마다 확인
+          return result_stream.str();  // 자식 프로세스가 종료됨
+      }
   }
-
-  std::string result_str;
-  for (auto& future : futures) {
-      auto json = future.get();  // 비동기 작업의 결과를 가져옴
-      // childExited를 사용하여 필요한 처리 수행...
-      result_str.append(json.str());
-      //std::cout << json.str();
-  }
-  fork_server::children.clear();
-  
-  return result_str;
+  // timeout 후에도 child process가 종료되지 않은 경우 처리
+  kill_child_wait(child_pid, opt_level, result_stream);
+  return result_stream.str();
 }
 
 void flush_stdcout(std::string_view msg) {
@@ -272,12 +248,10 @@ void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext
 
       auto optimized_argv_sets = init(argv_template, command);
 
-      for (const auto& argv_set : optimized_argv_sets) {
-        auto fork_ret = fork_clang(argv_set, ToolContext);
-        if(fork_ret) {
-          printf("fork error\n");
-          exit(1);
-        }
+      auto fork_ret = fork_clang(optimized_argv_sets, ToolContext);
+      if(fork_ret) {
+        printf("fork error\n");
+        exit(1);
       }
 
       // wait the compile & result
@@ -297,12 +271,10 @@ std::vector<std::string> copy_argv(int argc, char **argv) {
     return copy;
 }
 
-std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_template, const std::string& src_path) {
-  std::vector<std::vector<std::string>> optimized_argv_sets(4);
+std::vector<std::string> init(const std::vector<std::string>& argv_template, const std::string& src_path) {
+  std::vector<std::string> optimized_argv_sets;
 
-  for (int i = 0; i < 4; i++) {
-    optimized_argv_sets[i] = modify_argv_for_optimization(argv_template, fork_server::opt_levels[i], src_path);
-  }
+  optimized_argv_sets = modify_argv_for_optimization(argv_template, argv_template[2] /* opt_level */, src_path);
 
   return optimized_argv_sets;
 }
