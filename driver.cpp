@@ -82,7 +82,7 @@ std::vector<std::vector<std::string>> init(const std::vector<std::string>& argv_
 std::vector<std::string> modify_argv_for_optimization(const std::vector<std::string>& original_argv, const std::string& opt, const std::string& src_path);
 int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext);
 bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
-void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
+//void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss);
 std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level);
 std::string wait_child();
 bool fork_handshake();
@@ -171,28 +171,29 @@ bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::strin
     return false;  // 자식 프로세스가 종료되지 않음
 }
 
-void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
-    auto ret = kill(child_pid, SIGALRM);
-    if(ret == -1) {
-        exit_compiler(1, "kill");
-    }
-    // Wait for child process to terminate after sending SIGALRM
-    while (!wait_for_child_exit(child_pid, opt_level, ss));
-}
+//void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
+//    auto ret = kill(child_pid, SIGALRM);
+//    if(ret == -1) {
+//        exit_compiler(1, "kill");// 시스템콜 에러 이므로 컴파일러 종료
+//        exit(1);
+//    }
+//    // Wait for child process to terminate after sending SIGALRM
+//    while (!wait_for_child_exit(child_pid, opt_level, ss));
+//}
 
 std::stringstream wait_child_thread(pid_t child_pid, std::string_view opt_level) {
     std::stringstream result_stream;
 
-    time_t start_time = time(nullptr);
-    
-    while (time(nullptr) - start_time < fork_server::compile_timeout_sec) {
-        if (wait_for_child_exit(child_pid, opt_level, result_stream)) {  // 0.05초마다 확인
+    // 무한 루프로 자식 프로세스가 종료될 때까지 대기합니다.
+    while (true) {
+        if (wait_for_child_exit(child_pid, opt_level, result_stream)) {
             return result_stream;  // 자식 프로세스가 종료됨
         }
     }
-    // timeout 후에도 child process가 종료되지 않은 경우 처리
-    kill_child_wait(child_pid, opt_level, result_stream);
-    return result_stream;
+
+    // 이 부분은 더 이상 실행되지 않습니다.
+    // kill_child_wait(child_pid, opt_level, result_stream);
+    // return result_stream;
 }
 
 
