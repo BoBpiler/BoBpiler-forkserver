@@ -83,7 +83,7 @@ void kill_child_wait(pid_t child_pid, std::string_view opt_level, std::stringstr
 std::string wait_child();
 bool fork_handshake();
 void flush_stdcout(std::string_view);
-void make_result(std::stringstream& ss, std::string_view opt_level, int status);
+void make_result(std::stringstream& ss, std::string_view opt_level, int status, const char* message);
 void send_json(std::string result, std::string binary_base);
 void exit_compiler(int ret, std::string_view);
 
@@ -97,7 +97,7 @@ namespace fork_server {
   std::string time_out_set_msg = "time_out_set";
   const std::string compiler_string = "clang_";
   const char* bob_argv = "bob.c";
-
+  // int pipe_err[2] = { 0 };
 }
 
 namespace string_helper {
@@ -130,6 +130,15 @@ void exit_compiler(int ret, std::string_view msg) {
 int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext &ToolContext) {
   pid_t pid = fork();
   if (pid == 0) {   // 자식 프로세스
+    // if (pipe(fork_server::pipe_err) == -1) {
+    //   perror("pipe");
+    //   exit(EXIT_FAILURE);
+    // }
+    // // send to stderr to forkserver
+    // close(fork_server::pipe_err[0]);
+    // dup2(fork_server::pipe_err[1], STDERR_FILENO);
+    // close(fork_server::pipe_err[1]);
+
     std::vector<char*> argv_pointers;
     for (const auto& arg : argv_set) {
       argv_pointers.push_back(const_cast<char*>(arg.c_str()));
@@ -147,18 +156,31 @@ int fork_clang(const std::vector<std::string> &argv_set, const llvm::ToolContext
   }
 }
 
-void make_result(std::stringstream& ss, std::string_view opt_level, int status) {
-  ss << "        \"" << opt_level << "\": \""<< status << "\"";
+void make_result(std::stringstream& ss, std::string_view opt_level, int status, const char* message = "") {
+    ss << "        \"" << opt_level << "\": \""<< status << "\"";
+    if (strlen(message) > 0) {
+        ss << ", \"message\" : \"" << message << "\"";
+    }
 }
 
 bool wait_for_child_exit(pid_t child_pid, std::string_view opt_level, std::stringstream& ss) {
-    int status;
+    int status = 0;
     auto wpid = waitpid(child_pid, &status, WNOHANG);
     if (wpid == -1) {
         exit_compiler(1, "waitpid error");// 시스템콜 에러 이므로 컴파일러 종료
     } else if (wpid == child_pid) {
+        // char message[1024] = {0}; // Initialize with zeros
+        // if (status != 0) {
+        //     // recv stderr
+        //     ssize_t bytesRead;
+        //     if ((bytesRead = read(fork_server::pipe_err[0], message, sizeof(message) - 1)) > 0) {
+        //         message[bytesRead] = '\0';  // Null-terminate the string.
+        //     }
+        // }
         make_result(ss, opt_level, status);
+
         // 정상 종료된거 처리
+        // close(fork_server::pipe_err[0]);  // Close the reading end when done.
         return true;  // 자식 프로세스가 종료됨
     }
     return false;  // 자식 프로세스가 종료되지 않음
@@ -260,7 +282,7 @@ void start_forkserver(int argc, char**argv, const llvm::ToolContext &ToolContext
       auto result_str = std::move(wait_child());
       // make binary_base
       std::string prefix = string_helper::extract_prefix_up_to_last_slash(string_helper::extract_right_of_delimiter(command, '|'));
-      auto binary_base = std::move(prefix + fork_server::compiler_string);
+      auto binary_base = std::move(prefix + fork_server::compiler_string + std::get<1>(fork_server::children_process));
       send_json(result_str, binary_base);
     }
 }
