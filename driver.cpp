@@ -95,7 +95,7 @@ namespace fork_server {
   const char* fork_handshake_done_msg = "done\n";
   const char* exit_msg = "exit\n";
   std::string time_out_set_msg = "time_out_set";
-  const std::string compiler_string = "gcc_";
+  const std::string compiler_string = "clang_";
   const char* bob_argv = "bob.c";
 
 }
@@ -221,10 +221,12 @@ bool fork_handshake() {
 
 void send_json(std::string result, std::string binary_base) {
   std::stringstream json_stream;
+  json_stream << "{";
   json_stream << "    \"" << "binary_base" << "\": \"" << binary_base << "\",";
   json_stream << "    \"" << "result" << "\": {";
   json_stream << result;
-  json_stream << "    }\n";
+  json_stream << "    }";
+  json_stream << "}\n";
   std::cout << json_stream.str();
   std::cout.flush();
 }
