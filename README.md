@@ -4,7 +4,7 @@ gcc/clang BoBpiler Forkserver
 
 ### Quick Start
 ```bash
-./clang-18 bob.c                
+$ ./clang-18 bob.c                
 fork client hello
 fork server hello # stdin
 done
